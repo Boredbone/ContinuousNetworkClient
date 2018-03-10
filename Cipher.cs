@@ -20,6 +20,9 @@ namespace Boredbone.ContinuousNetworkClient
 
 
         public static byte[] EncryptAes(string plainText, string key)
+            => EncryptAes(plainText, key, true, Encoding.UTF8);
+
+        public static byte[] EncryptAes(string plainText, string key, bool nullEndMark, Encoding encoding)
         {
             var csp = new AesCryptoServiceProvider()
             {
@@ -41,16 +44,23 @@ namespace Boredbone.ContinuousNetworkClient
             {
                 outms.Write(bytesIV, 0, 16);
 
-                byte[] toEncrypt = Encoding.GetEncoding("Shift_JIS").GetBytes(plainText);
+                byte[] toEncrypt = encoding.GetBytes(plainText);
 
                 cs.Write(toEncrypt, 0, toEncrypt.Length);
-                cs.Write(new byte[] { 0 }, 0, 1);
+                if (nullEndMark)
+                {
+                    cs.Write(new byte[] { 0 }, 0, 1);
+                }
                 cs.FlushFinalBlock();
 
                 return outms.ToArray();
             }
         }
+
         public static string DecryptAes(byte[] data, string key)
+            => DecryptAes(data, key, Encoding.UTF8);
+
+        public static string DecryptAes(byte[] data, string key, Encoding encoding)
         {
             using (var inms = new MemoryStream(data))
             {
@@ -69,7 +79,7 @@ namespace Boredbone.ContinuousNetworkClient
 
                 using (var decryptor = csp.CreateDecryptor())
                 using (var cs = new CryptoStream(inms, decryptor, CryptoStreamMode.Read))
-                using (var reader = new StreamReader(cs, Encoding.GetEncoding("Shift_JIS")))
+                using (var reader = new StreamReader(cs, encoding))
                 {
                     return reader.ReadToEnd();
                 }
@@ -77,7 +87,7 @@ namespace Boredbone.ContinuousNetworkClient
         }
 
 
-        public static void CreateKey1(out string iv, out string key)
+        public static (string iv, string key) CreateAesKey()
         {
             var csp = new AesCryptoServiceProvider
             {
@@ -90,60 +100,65 @@ namespace Boredbone.ContinuousNetworkClient
             csp.GenerateIV();
             csp.GenerateKey();
 
-            iv = Convert.ToBase64String(csp.IV);
-            key = Convert.ToBase64String(csp.Key);
+            var iv = Convert.ToBase64String(csp.IV);
+            var key = Convert.ToBase64String(csp.Key);
+            return (iv, key);
         }
 
 
-        public static byte[] EncryptRsa(string plainText, string key)
+        public static byte[] EncryptRsa(string plainText, string key, Encoding encoding)
         {
-            var publicKeyPem = new StringReader(key);
-            var publicKeyReader = new PemReader(publicKeyPem);
-            var publicKeyParam = (AsymmetricKeyParameter)publicKeyReader.ReadObject();
+            using (var publicKeyPem = new StringReader(key))
+            {
+                var publicKeyReader = new PemReader(publicKeyPem);
+                var publicKeyParam = (AsymmetricKeyParameter)publicKeyReader.ReadObject();
 
-            var rsa = new OaepEncoding(new RsaEngine());
+                var rsa = new OaepEncoding(new RsaEngine());
 
-            rsa.Init(true, publicKeyParam);
+                rsa.Init(true, publicKeyParam);
 
-            var blockDataSize = rsa.GetInputBlockSize();
+                var blockDataSize = rsa.GetInputBlockSize();
 
-            var encrypted = Encoding.GetEncoding("Shift_JIS")
-                .GetBytes(plainText)
-                .Buffer(blockDataSize)
-                .Select(x =>
-                {
-                    var arr = x.ToArray();
-                    return rsa.ProcessBlock(arr, 0, arr.Length);
-                })
-                .SelectMany(x => x)
-                .ToArray();
+                var encrypted = encoding
+                    .GetBytes(plainText)
+                    .Buffer(blockDataSize)
+                    .Select(x =>
+                    {
+                        var arr = x.ToArray();
+                        return rsa.ProcessBlock(arr, 0, arr.Length);
+                    })
+                    .SelectMany(x => x)
+                    .ToArray();
 
-            return encrypted;
+                return encrypted;
+            }
         }
 
-        public static string DecryptRsa(byte[] encrypted, string key)
+        public static string DecryptRsa(byte[] encrypted, string key, Encoding encoding)
         {
-            var privateKeyPem = new StringReader(key);
+            using (var privateKeyPem = new StringReader(key))
+            {
 
-            var rsa = new OaepEncoding(new RsaEngine());
-            var privateKeyReader = new PemReader(privateKeyPem);
-            var keyPair = (AsymmetricCipherKeyPair)privateKeyReader.ReadObject();
-            rsa.Init(false, keyPair.Private);
+                var rsa = new OaepEncoding(new RsaEngine());
+                var privateKeyReader = new PemReader(privateKeyPem);
+                var keyPair = (AsymmetricCipherKeyPair)privateKeyReader.ReadObject();
+                rsa.Init(false, keyPair.Private);
 
 
-            var blockDataSize = rsa.GetInputBlockSize();
+                var blockDataSize = rsa.GetInputBlockSize();
 
-            var decrypted = encrypted
-                .Buffer(blockDataSize)
-                .Select(x =>
-                {
-                    var arr = x.ToArray();
-                    return rsa.ProcessBlock(arr, 0, arr.Length);
-                })
-                .SelectMany(x => x)
-                .ToArray();
+                var decrypted = encrypted
+                    .Buffer(blockDataSize)
+                    .Select(x =>
+                    {
+                        var arr = x.ToArray();
+                        return rsa.ProcessBlock(arr, 0, arr.Length);
+                    })
+                    .SelectMany(x => x)
+                    .ToArray();
 
-            return Encoding.GetEncoding("Shift_JIS").GetString(decrypted);
+                return encoding.GetString(decrypted);
+            }
         }
 
     }

@@ -79,6 +79,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Cipher.cs" />
+    <Compile Include="IServerCertificate.cs" />
     <Compile Include="NetworkClient.cs" />
     <Compile Include="NetworkStreamHelper.cs" />
     <Compile Include="Packet\IReceivePacket.cs" />

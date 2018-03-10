@@ -26,9 +26,7 @@ namespace Boredbone.ContinuousNetworkClient
     {
         public IPAddress[] IpAddresss { get; set; }
         public string HostName { get; set; }
-        public string ServerName { get; set; }
         public int Port { get; set; }
-        public X509CertificateCollection X509Certificates { get; set; }
     }
 
     public class NetworkClient<TReceivePacket, TTransmitPacket> : IDisposable
@@ -40,6 +38,7 @@ namespace Boredbone.ContinuousNetworkClient
         private Subject<TReceivePacket> ReceivedSubject { get; }
         public IObservable<TReceivePacket> Received => this.ReceivedSubject.AsObservable();
 
+        public IServerCertificate ServerCertificate { get; set; } = null;
 
 
         private readonly AsyncLock asyncLock;
@@ -154,7 +153,7 @@ namespace Boredbone.ContinuousNetworkClient
                 currentWorker = this.clientWorker;
                 this.clientWorker = null;
 
-                this.clientWorker = new NetworkClientWorker(options);
+                this.clientWorker = new NetworkClientWorker(options, this.ServerCertificate);
                 this.SubscribeWorker();
             }
             currentWorker?.Dispose();
@@ -170,6 +169,7 @@ namespace Boredbone.ContinuousNetworkClient
 
         public async Task SendAsync(TTransmitPacket packet)
         {
+            this.cancellationTokenSource.Token.ThrowIfCancellationRequested();
             var worker = await this.GetWorkerAsync().ConfigureAwait(false);
             if (worker != null)
             {
@@ -204,12 +204,12 @@ namespace Boredbone.ContinuousNetworkClient
 
             private readonly CancellationTokenSource cancellationTokenSource;
 
-            static X509CertificateCollection X509Certificates;
+            private readonly IServerCertificate serverCertificate;
 
-            public NetworkClientWorker(NetworkOptions options)
+            public NetworkClientWorker(NetworkOptions options, IServerCertificate serverCertificate)
             {
                 this.options = options;
-                X509Certificates = options.X509Certificates;
+                this.serverCertificate = serverCertificate;
 
                 this.asyncLock = new AsyncLock();
                 this.cancellationTokenSource = new CancellationTokenSource();
@@ -303,9 +303,7 @@ namespace Boredbone.ContinuousNetworkClient
                         if (this.stream == null)
                         {
                             bool useSsl = true;
-                            if (useSsl
-                                && this.options.ServerName != null
-                                && this.options.X509Certificates != null)
+                            if (useSsl && this.serverCertificate != null)
                             {
                                 var sslStream = new SslStream(client.GetStream(), false);
                                 //var sslStream =
@@ -316,8 +314,8 @@ namespace Boredbone.ContinuousNetworkClient
                                 //    new SslStream(client.GetStream(), false,
                                 //    RemoteCertificateValidationCallback);
 
-                                await sslStream.AuthenticateAsClientAsync(this.options.ServerName,
-                                    this.options.X509Certificates,
+                                await sslStream.AuthenticateAsClientAsync(this.serverCertificate.ServerName,
+                                    this.serverCertificate.CertificateCollection,
                                     SslProtocols.Ssl2 | SslProtocols.Ssl3 | SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12,
                                     false);
 
@@ -431,130 +429,130 @@ namespace Boredbone.ContinuousNetworkClient
             }
 
 
-            //証明書の内容を表示するメソッド
-            private static void PrintCertificate(X509Certificate certificate)
-            {
-                if (certificate == null)
-                {
-                    return;
-                }
-                Console.WriteLine("===========================================");
-                Console.WriteLine("Subject={0}", certificate.Subject);
-                Console.WriteLine("Issuer={0}", certificate.Issuer);
-                Console.WriteLine("Format={0}", certificate.GetFormat());
-                Console.WriteLine("ExpirationDate={0}", certificate.GetExpirationDateString());
-                Console.WriteLine("EffectiveDate={0}", certificate.GetEffectiveDateString());
-                Console.WriteLine("KeyAlgorithm={0}", certificate.GetKeyAlgorithm());
-                Console.WriteLine("PublicKey={0}", certificate.GetPublicKeyString());
-                Console.WriteLine("SerialNumber={0}", certificate.GetSerialNumberString());
-                Console.WriteLine("===========================================");
-            }
-
-            //サーバー証明書を検証するためのコールバックメソッド
-            private static Boolean RemoteCertificateValidationCallback(Object sender,
-                X509Certificate certificate,
-                X509Chain chain,
-                SslPolicyErrors sslPolicyErrors)
-            {
-                //PrintCertificate(certificate);
-                //Console.WriteLine(certificate.ToString(true));
-
-                if (sslPolicyErrors == SslPolicyErrors.None)
-                {
-                    Console.WriteLine("サーバー証明書の検証に成功しました\n");
-                    return true;
-                }
-                else
-                {
-                    //何かサーバー証明書検証エラーが発生している
-
-                    //SslPolicyErrors列挙体には、Flags属性があるので、
-                    //エラーの原因が複数含まれているかもしれない。
-                    //そのため、&演算子で１つ１つエラーの原因を検出する。
-                    if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateChainErrors) ==
-                        SslPolicyErrors.RemoteCertificateChainErrors)
-                    {
-                        Console.WriteLine("ChainStatusが、空でない配列を返しました");
-                    }
-
-                    if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNameMismatch) ==
-                        SslPolicyErrors.RemoteCertificateNameMismatch)
-                    {
-                        Console.WriteLine("証明書名が不一致です");
-                    }
-
-                    if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNotAvailable) ==
-                        SslPolicyErrors.RemoteCertificateNotAvailable)
-                    {
-                        Console.WriteLine("証明書が利用できません");
-                    }
-
-
-                    foreach (var item in X509Certificates)
-                    {
-                        if (certificate.Issuer == item.Issuer)
-                        {
-                            Console.WriteLine("ok");
-                            PrintCertificate(certificate);
-                            PrintCertificate(item);
-                        }
-                    }
-
-                    return true;
-                    //検証失敗とする
-                    return false;
-                }
-            }
-
-            public static X509Certificate SelectLocalCertificate(
-                object sender,
-                string targetHost,
-                X509CertificateCollection localCertificates,
-                X509Certificate remoteCertificate,
-                string[] acceptableIssuers)
-            {
-                /*
-                foreach(var item in acceptableIssuers)
-                {
-                    Console.WriteLine(item);
-                }*/
-                //foreach (var item in localCertificates)
-                //{
-                //    PrintCertificate(item);
-                //}
-                //PrintCertificate(remoteCertificate);
-
-
-
-                Console.WriteLine("Client is selecting a local certificate.");
-                if (acceptableIssuers != null &&
-                    acceptableIssuers.Length > 0 &&
-                    X509Certificates != null &&
-                    X509Certificates.Count > 0)
-                {
-                    // Use the first certificate that is from an acceptable issuer.
-                    foreach (X509Certificate certificate in X509Certificates)
-                    {
-                        string issuer = certificate.Issuer;
-                        if (Array.IndexOf(acceptableIssuers, issuer) != -1)
-                        {
-                            Console.WriteLine("selected");
-                            return certificate;
-                        }
-                    }
-                }
-
-                var n = 1;
-                if (X509Certificates != null &&
-                    X509Certificates.Count > n)
-                {
-                    Console.WriteLine("use first cert");
-                    return X509Certificates[n];
-                }
-                Console.WriteLine("no cert");
-
-                return null;
-            }
+            ////証明書の内容を表示するメソッド
+            //private static void PrintCertificate(X509Certificate certificate)
+            //{
+            //    if (certificate == null)
+            //    {
+            //        return;
+            //    }
+            //    Console.WriteLine("===========================================");
+            //    Console.WriteLine("Subject={0}", certificate.Subject);
+            //    Console.WriteLine("Issuer={0}", certificate.Issuer);
+            //    Console.WriteLine("Format={0}", certificate.GetFormat());
+            //    Console.WriteLine("ExpirationDate={0}", certificate.GetExpirationDateString());
+            //    Console.WriteLine("EffectiveDate={0}", certificate.GetEffectiveDateString());
+            //    Console.WriteLine("KeyAlgorithm={0}", certificate.GetKeyAlgorithm());
+            //    Console.WriteLine("PublicKey={0}", certificate.GetPublicKeyString());
+            //    Console.WriteLine("SerialNumber={0}", certificate.GetSerialNumberString());
+            //    Console.WriteLine("===========================================");
+            //}
+            //
+            ////サーバー証明書を検証するためのコールバックメソッド
+            //private static Boolean RemoteCertificateValidationCallback(Object sender,
+            //    X509Certificate certificate,
+            //    X509Chain chain,
+            //    SslPolicyErrors sslPolicyErrors)
+            //{
+            //    //PrintCertificate(certificate);
+            //    //Console.WriteLine(certificate.ToString(true));
+            //
+            //    if (sslPolicyErrors == SslPolicyErrors.None)
+            //    {
+            //        Console.WriteLine("サーバー証明書の検証に成功しました\n");
+            //        return true;
+            //    }
+            //    else
+            //    {
+            //        //何かサーバー証明書検証エラーが発生している
+            //
+            //        //SslPolicyErrors列挙体には、Flags属性があるので、
+            //        //エラーの原因が複数含まれているかもしれない。
+            //        //そのため、&演算子で１つ１つエラーの原因を検出する。
+            //        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateChainErrors) ==
+            //            SslPolicyErrors.RemoteCertificateChainErrors)
+            //        {
+            //            Console.WriteLine("ChainStatusが、空でない配列を返しました");
+            //        }
+            //
+            //        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNameMismatch) ==
+            //            SslPolicyErrors.RemoteCertificateNameMismatch)
+            //        {
+            //            Console.WriteLine("証明書名が不一致です");
+            //        }
+            //
+            //        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNotAvailable) ==
+            //            SslPolicyErrors.RemoteCertificateNotAvailable)
+            //        {
+            //            Console.WriteLine("証明書が利用できません");
+            //        }
+            //
+            //
+            //        foreach (var item in X509Certificates)
+            //        {
+            //            if (certificate.Issuer == item.Issuer)
+            //            {
+            //                Console.WriteLine("ok");
+            //                PrintCertificate(certificate);
+            //                PrintCertificate(item);
+            //            }
+            //        }
+            //
+            //        return true;
+            //        //検証失敗とする
+            //        return false;
+            //    }
+            //}
+            //
+            //public static X509Certificate SelectLocalCertificate(
+            //    object sender,
+            //    string targetHost,
+            //    X509CertificateCollection localCertificates,
+            //    X509Certificate remoteCertificate,
+            //    string[] acceptableIssuers)
+            //{
+            //    /*
+            //    foreach(var item in acceptableIssuers)
+            //    {
+            //        Console.WriteLine(item);
+            //    }*/
+            //    //foreach (var item in localCertificates)
+            //    //{
+            //    //    PrintCertificate(item);
+            //    //}
+            //    //PrintCertificate(remoteCertificate);
+            //
+            //
+            //
+            //    Console.WriteLine("Client is selecting a local certificate.");
+            //    if (acceptableIssuers != null &&
+            //        acceptableIssuers.Length > 0 &&
+            //        X509Certificates != null &&
+            //        X509Certificates.Count > 0)
+            //    {
+            //        // Use the first certificate that is from an acceptable issuer.
+            //        foreach (X509Certificate certificate in X509Certificates)
+            //        {
+            //            string issuer = certificate.Issuer;
+            //            if (Array.IndexOf(acceptableIssuers, issuer) != -1)
+            //            {
+            //                Console.WriteLine("selected");
+            //                return certificate;
+            //            }
+            //        }
+            //    }
+            //
+            //    var n = 1;
+            //    if (X509Certificates != null &&
+            //        X509Certificates.Count > n)
+            //    {
+            //        Console.WriteLine("use first cert");
+            //        return X509Certificates[n];
+            //    }
+            //    Console.WriteLine("no cert");
+            //
+            //    return null;
+            //}
 
             public static void SetTcpKeepAlive(Socket socket, uint keepaliveTime, uint keepaliveInterval)
             {

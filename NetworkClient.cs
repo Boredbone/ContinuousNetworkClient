@@ -47,7 +47,11 @@ namespace Boredbone.ContinuousNetworkClient
 
         private NetworkClientWorker clientWorker;
 
+        private NetworkOptions nextOptions = null;
 
+        private int retryToConnectSameServerCount;
+        public int MaxRetryCountOfConnectingSameServer { get; set; } = 10;
+        public TimeSpan ConnectionStableTimeThreshold { get; set; } = TimeSpan.FromMinutes(5);
 
 
         public NetworkClient()
@@ -82,28 +86,38 @@ namespace Boredbone.ContinuousNetworkClient
             //await this.SetWorkerAsync(null);
         }
 
-        public Task RedirectAsync(NetworkOptions options) => this.SetWorkerAsync(options);
-
-
         public async Task WorkAsync(NetworkOptions options)
         {
-            //await this.SetWorkerAsync(ipAddresss, hostName, port).ConfigureAwait(false);
-
-            var cancellationToken = this.cancellationTokenSource.Token;
-
             try
             {
-                await this.SetWorkerAsync(options).ConfigureAwait(false);
+                Console.WriteLine("start connection");
+                await this.RedirectAsync(options);
+                Console.WriteLine($"connect to {this.nextOptions.HostName}:{this.nextOptions.Port}");
+                this.retryToConnectSameServerCount++;
+                await this.WorkMainAsync();
             }
             catch (Exception e)
             {
                 Console.WriteLine(e);
+                throw;
             }
+        }
+
+        private async Task WorkMainAsync()
+        {
+
+            var cancellationToken = this.cancellationTokenSource.Token;
+
 
             while (!cancellationToken.IsCancellationRequested)
             {
+                Console.WriteLine($"try to connect server. {this.retryToConnectSameServerCount}th try");
+                var startTime = DateTimeOffset.UtcNow;
+
                 try
                 {
+                    await this.ChangeWorkerAsync().ConfigureAwait(false);
+
                     var worker = await this.GetWorkerAsync().ConfigureAwait(false);
                     if (worker != null)
                     {
@@ -130,10 +144,33 @@ namespace Boredbone.ContinuousNetworkClient
                     {
                         Console.WriteLine("client excep inner\n" + e.InnerException.ToString());
                     }
+                    if (!CheckConnectionRetryCount(startTime))
+                    {
+                        throw;
+                    }
                     await Task.Delay(5000);
+                    continue;
                 }
-                //break;
+
+                if (!CheckConnectionRetryCount(startTime))
+                {
+                    throw new Exception("cannnot connect to server");
+                }
             }
+        }
+
+        private bool CheckConnectionRetryCount(in DateTimeOffset startTime)
+        {
+            var now = DateTimeOffset.UtcNow;
+
+            if (now - startTime > this.ConnectionStableTimeThreshold)
+            {
+                this.retryToConnectSameServerCount = 0;
+                return true;
+            }
+
+            this.retryToConnectSameServerCount++;
+            return (this.retryToConnectSameServerCount <= this.MaxRetryCountOfConnectingSameServer);
         }
 
         private async Task<NetworkClientWorker> GetWorkerAsync()
@@ -145,7 +182,13 @@ namespace Boredbone.ContinuousNetworkClient
         }
 
 
-        private async Task SetWorkerAsync(NetworkOptions options)
+
+        public Task RedirectAsync(NetworkOptions options)
+            => (options != null) ? this.CloseWorkerAsync(options) : throw new ArgumentNullException();
+
+        private Task ChangeWorkerAsync() => this.CloseWorkerAsync(null);
+
+        private async Task CloseWorkerAsync(NetworkOptions nextOptions)
         {
             NetworkClientWorker currentWorker;
             using (var locking = await this.asyncLock.LockAsync().ConfigureAwait(false))
@@ -153,8 +196,18 @@ namespace Boredbone.ContinuousNetworkClient
                 currentWorker = this.clientWorker;
                 this.clientWorker = null;
 
-                this.clientWorker = new NetworkClientWorker(options, this.ServerCertificate);
-                this.SubscribeWorker();
+                if (nextOptions != null)
+                {
+                    // set next server information, not prepare new client
+                    this.nextOptions = nextOptions;
+                    this.retryToConnectSameServerCount = 0;
+                }
+                else
+                {
+                    // create new client using next server information
+                    this.clientWorker = new NetworkClientWorker(this.nextOptions, this.ServerCertificate);
+                    this.SubscribeWorker();
+                }
             }
             currentWorker?.Dispose();
         }
@@ -174,8 +227,12 @@ namespace Boredbone.ContinuousNetworkClient
             if (worker != null)
             {
                 await worker.SendAsync(packet, this.cancellationTokenSource.Token);
+                Console.WriteLine("completed");
             }
-            Console.WriteLine("completed");
+            else
+            {
+                Console.WriteLine("There is no connction. request was ignored");
+            }
         }
 
 

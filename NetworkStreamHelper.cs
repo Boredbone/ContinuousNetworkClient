@@ -40,6 +40,17 @@ namespace Boredbone.ContinuousNetworkClient
 
         public async Task WriteAsync(Stream stream, TTransmitPacket packet, CancellationToken cancellationToken)
         {
+            using (var locking = await this.writeLock.LockAsync().ConfigureAwait(false))
+            {
+                await packet.WriteToStreamAsync(stream, cancellationToken);
+            }
+            //foreach (var item in packet.GetTransmitData())
+            //{
+            //    cancellationToken.ThrowIfCancellationRequested();
+            //    await WriteWithCancellationAsync(stream, item, cancellationToken).ConfigureAwait(false);
+            //}
+            //return;
+#if false
             using (var ms = new MemoryStream(packet.Length))
             {
                 foreach (var item in packet.GetTransmitData())
@@ -56,6 +67,8 @@ namespace Boredbone.ContinuousNetworkClient
                 }
             }
             return;
+# endif
+#if false
             using (var locking = await this.writeLock.LockAsync().ConfigureAwait(false))
             {
                 foreach (var item in packet.GetTransmitData())
@@ -108,7 +121,8 @@ namespace Boredbone.ContinuousNetworkClient
                 //cancellationToken.ThrowIfCancellationRequested();
                 //await WriteWithCancellationAsync(stream, data, cancellationToken).ConfigureAwait(false);
             }
-        }
+#endif
+    }
 
         public async Task<(bool isSucceeded, TReceivePacket packet)> ReadAsync
             (Stream stream, CancellationToken cancellationToken)

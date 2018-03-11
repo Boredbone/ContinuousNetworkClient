@@ -23,18 +23,23 @@ using System.Collections.Concurrent;
 
 namespace Boredbone.ContinuousNetworkClient
 {
-    public class DisconnectingEventArgs<TTransmitPacket>
-        where TTransmitPacket : ITransmitPacket
-    {
-        public ConcurrentQueue<Tuple<TTransmitPacket, TimeSpan>> FinallyTransmitPackets { get; }
-        = new ConcurrentQueue<Tuple<TTransmitPacket, TimeSpan>>();
-    }
-
     public class NetworkOptions
     {
         public IPAddress[] IpAddresss { get; set; }
         public string HostName { get; set; }
         public int Port { get; set; }
+    }
+
+    public static class NetworkExtensions
+    {
+        public static bool Resembles(this EndPoint e1, EndPoint e2)
+        {
+            if (e1 is IPEndPoint ip1 && e2 is IPEndPoint ip2)
+            {
+                return ip1.Port == ip2.Port && ip1.Address.Equals(ip2.Address);
+            }
+            return e1 == e2;
+        }
     }
 
     public class NetworkClient<TReceivePacket, TTransmitPacket> : IDisposable
@@ -46,9 +51,8 @@ namespace Boredbone.ContinuousNetworkClient
         private Subject<TReceivePacket> ReceivedSubject { get; }
         public IObservable<TReceivePacket> Received => this.ReceivedSubject.AsObservable();
 
-        private Subject<DisconnectingEventArgs<TTransmitPacket>> DisconnectingSubject { get; }
-        public IObservable<DisconnectingEventArgs<TTransmitPacket>> Disconnecting
-            => this.DisconnectingSubject.AsObservable();
+        private Subject<EndPoint> ConnectedSubject { get; }
+        public IObservable<EndPoint> Connected => this.ConnectedSubject.AsObservable();
 
         public IServerCertificate ServerCertificate { get; set; } = null;
 
@@ -75,20 +79,19 @@ namespace Boredbone.ContinuousNetworkClient
             this.disposables = new CompositeDisposable();
 
             this.ReceivedSubject = new Subject<TReceivePacket>();
-            this.DisconnectingSubject = new Subject<DisconnectingEventArgs<TTransmitPacket>>();
 
             this.clientWorker = null;
+
+            this.ConnectedSubject = new Subject<EndPoint>().AddTo(this.disposables);
 
 
             Disposable.Create(() =>
             {
                 this.Cancel();
 
-                //this.clientWorker?.Dispose();
-                this.DisconnectWorker(this.clientWorker, true);
+                this.clientWorker?.Dispose();
 
                 this.ReceivedSubject.Dispose();
-                //this.DisconnectingSubject.Dispose();
             })
             .AddTo(this.disposables);
         }
@@ -172,6 +175,11 @@ namespace Boredbone.ContinuousNetworkClient
                 {
                     throw new Exception("cannnot connect to server");
                 }
+
+                if (this.retryToConnectSameServerCount > 1)
+                {
+                    await Task.Delay(5000);
+                }
             }
         }
 
@@ -181,7 +189,7 @@ namespace Boredbone.ContinuousNetworkClient
 
             if (now - startTime > this.ConnectionStableTimeThreshold)
             {
-                this.retryToConnectSameServerCount = 0;
+                this.retryToConnectSameServerCount = 1;
                 return true;
             }
 
@@ -225,64 +233,8 @@ namespace Boredbone.ContinuousNetworkClient
                     this.SubscribeWorker();
                 }
             }
-            this.DisconnectWorker(currentWorker, false);
 
-            //currentWorker?.Dispose();
-        }
-
-
-        private void DisconnectWorker(NetworkClientWorker worker, bool disposeSubject)
-        {
-            this.DisconnectWorkerAsync(worker, disposeSubject).FireAndForget(e =>
-            {
-            });
-        }
-        private async Task DisconnectWorkerAsync(NetworkClientWorker worker, bool disposeSubject)
-        {
-            try
-            {;
-                var args = new DisconnectingEventArgs<TTransmitPacket>();
-                this.DisconnectingSubject.OnNext(args);
-                if (worker != null)
-                {
-                    Console.WriteLine("disconnecting");
-                    foreach (var item in args.FinallyTransmitPackets)
-                    {
-                        await SendAnywayAsync(worker, item.Item1, item.Item2).ConfigureAwait(false);
-                        //Console.WriteLine("send disconnecting packet");
-                    }
-                    Console.WriteLine("disconnected");
-                }
-            }
-            catch (AggregateException e)
-            {
-                if (e != null)
-                {
-                    Console.WriteLine(e);
-                    if (e.InnerExceptions != null)
-                    {
-                        foreach (var item in e.InnerExceptions)
-                        {
-                            Console.WriteLine(item);
-                        }
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                if (e != null)
-                {
-                    Console.WriteLine(e);
-                }
-            }
-            finally
-            {
-                worker?.Dispose();
-                if (disposeSubject)
-                {
-                    this.DisconnectingSubject.Dispose();
-                }
-            }
+            currentWorker?.Dispose();
         }
 
         private void SubscribeWorker()
@@ -290,6 +242,7 @@ namespace Boredbone.ContinuousNetworkClient
             if (this.clientWorker != null)
             {
                 this.clientWorker.Received.Subscribe(this.ReceivedSubject).AddTo(this.disposables);
+                this.clientWorker.Connected.Subscribe(this.ConnectedSubject).AddTo(this.disposables);
             }
         }
 
@@ -354,6 +307,9 @@ namespace Boredbone.ContinuousNetworkClient
             private Subject<TReceivePacket> ReceivedSubject { get; }
             public IObservable<TReceivePacket> Received => this.ReceivedSubject.AsObservable();
 
+            private Subject<EndPoint> ConnectedSubject { get; }
+            public IObservable<EndPoint> Connected => this.ConnectedSubject.AsObservable();
+
             private readonly NetworkStreamHelper<TReceivePacket, TTransmitPacket> streamHelper;
 
             private readonly NetworkOptions options;
@@ -375,6 +331,8 @@ namespace Boredbone.ContinuousNetworkClient
                 this.disposables = new CompositeDisposable();
 
                 this.ReceivedSubject = new Subject<TReceivePacket>();
+
+                this.ConnectedSubject = new Subject<EndPoint>().AddTo(this.disposables);
 
                 this.streamHelper = new NetworkStreamHelper<TReceivePacket, TTransmitPacket>();
 
@@ -441,8 +399,8 @@ namespace Boredbone.ContinuousNetworkClient
                                     .ConfigureAwait(false);
                             }
 
-                            Console.WriteLine(client.Client.LocalEndPoint);
-                            Console.WriteLine(client.Client.RemoteEndPoint);
+                            Console.WriteLine($"connected to {client.Client.RemoteEndPoint} " +
+                                $"from {client.Client.LocalEndPoint}");
 
 
 
@@ -476,7 +434,8 @@ namespace Boredbone.ContinuousNetworkClient
 
                                 await sslStream.AuthenticateAsClientAsync(this.serverCertificate.ServerName,
                                     this.serverCertificate.CertificateCollection,
-                                    SslProtocols.Ssl2 | SslProtocols.Ssl3 | SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12,
+                                    SslProtocols.Ssl2 | SslProtocols.Ssl3
+                                    | SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12,
                                     false)
                                     .ConfigureAwait(false);
 
@@ -504,6 +463,8 @@ namespace Boredbone.ContinuousNetworkClient
 
                         Console.WriteLine("stream " + ((this.stream == null) ? "null" : "active"));
                         Console.WriteLine("client " + ((this.client.Connected) ? "connected" : "disconnected"));
+
+                        this.ConnectedSubject.OnNext(this.client.Client.RemoteEndPoint);
 
                         while (this.client.Connected)
                         {

@@ -18,9 +18,17 @@ using System.IO;
 using System.Security.Authentication;
 using Boredbone.ContinuousNetworkClient.Packet;
 using Boredbone.Utility;
+using Boredbone.Utility.Extensions;
+using System.Collections.Concurrent;
 
 namespace Boredbone.ContinuousNetworkClient
 {
+    public class DisconnectingEventArgs<TTransmitPacket>
+        where TTransmitPacket : ITransmitPacket
+    {
+        public ConcurrentQueue<Tuple<TTransmitPacket, TimeSpan>> FinallyTransmitPackets { get; }
+        = new ConcurrentQueue<Tuple<TTransmitPacket, TimeSpan>>();
+    }
 
     public class NetworkOptions
     {
@@ -38,6 +46,10 @@ namespace Boredbone.ContinuousNetworkClient
         private Subject<TReceivePacket> ReceivedSubject { get; }
         public IObservable<TReceivePacket> Received => this.ReceivedSubject.AsObservable();
 
+        private Subject<DisconnectingEventArgs<TTransmitPacket>> DisconnectingSubject { get; }
+        public IObservable<DisconnectingEventArgs<TTransmitPacket>> Disconnecting
+            => this.DisconnectingSubject.AsObservable();
+
         public IServerCertificate ServerCertificate { get; set; } = null;
 
 
@@ -52,6 +64,7 @@ namespace Boredbone.ContinuousNetworkClient
         private int retryToConnectSameServerCount;
         public int MaxRetryCountOfConnectingSameServer { get; set; } = 10;
         public TimeSpan ConnectionStableTimeThreshold { get; set; } = TimeSpan.FromMinutes(5);
+        public TimeSpan TransmitTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
 
         public NetworkClient()
@@ -62,6 +75,7 @@ namespace Boredbone.ContinuousNetworkClient
             this.disposables = new CompositeDisposable();
 
             this.ReceivedSubject = new Subject<TReceivePacket>();
+            this.DisconnectingSubject = new Subject<DisconnectingEventArgs<TTransmitPacket>>();
 
             this.clientWorker = null;
 
@@ -70,9 +84,11 @@ namespace Boredbone.ContinuousNetworkClient
             {
                 this.Cancel();
 
-                this.clientWorker?.Dispose();
+                //this.clientWorker?.Dispose();
+                this.DisconnectWorker(this.clientWorker, true);
 
                 this.ReceivedSubject.Dispose();
+                //this.DisconnectingSubject.Dispose();
             })
             .AddTo(this.disposables);
         }
@@ -175,7 +191,7 @@ namespace Boredbone.ContinuousNetworkClient
 
         private async Task<NetworkClientWorker> GetWorkerAsync()
         {
-            using (var locking = await this.asyncLock.LockAsync())
+            using (var locking = await this.asyncLock.LockAsync().ConfigureAwait(false))
             {
                 return this.clientWorker;
             }
@@ -209,7 +225,64 @@ namespace Boredbone.ContinuousNetworkClient
                     this.SubscribeWorker();
                 }
             }
-            currentWorker?.Dispose();
+            this.DisconnectWorker(currentWorker, false);
+
+            //currentWorker?.Dispose();
+        }
+
+
+        private void DisconnectWorker(NetworkClientWorker worker, bool disposeSubject)
+        {
+            this.DisconnectWorkerAsync(worker, disposeSubject).FireAndForget(e =>
+            {
+            });
+        }
+        private async Task DisconnectWorkerAsync(NetworkClientWorker worker, bool disposeSubject)
+        {
+            try
+            {;
+                var args = new DisconnectingEventArgs<TTransmitPacket>();
+                this.DisconnectingSubject.OnNext(args);
+                if (worker != null)
+                {
+                    Console.WriteLine("disconnecting");
+                    foreach (var item in args.FinallyTransmitPackets)
+                    {
+                        await SendAnywayAsync(worker, item.Item1, item.Item2).ConfigureAwait(false);
+                        //Console.WriteLine("send disconnecting packet");
+                    }
+                    Console.WriteLine("disconnected");
+                }
+            }
+            catch (AggregateException e)
+            {
+                if (e != null)
+                {
+                    Console.WriteLine(e);
+                    if (e.InnerExceptions != null)
+                    {
+                        foreach (var item in e.InnerExceptions)
+                        {
+                            Console.WriteLine(item);
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                if (e != null)
+                {
+                    Console.WriteLine(e);
+                }
+            }
+            finally
+            {
+                worker?.Dispose();
+                if (disposeSubject)
+                {
+                    this.DisconnectingSubject.Dispose();
+                }
+            }
         }
 
         private void SubscribeWorker()
@@ -226,7 +299,35 @@ namespace Boredbone.ContinuousNetworkClient
             var worker = await this.GetWorkerAsync().ConfigureAwait(false);
             if (worker != null)
             {
-                await worker.SendAsync(packet, this.cancellationTokenSource.Token);
+                if (this.TransmitTimeout.TotalMilliseconds >= 1)
+                {
+                    await worker.SendAsync(packet, this.TransmitTimeout, this.cancellationTokenSource.Token)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await worker.SendAsync(packet, this.cancellationTokenSource.Token)
+                        .ConfigureAwait(false);
+                }
+                Console.WriteLine("completed");
+            }
+            else
+            {
+                Console.WriteLine("There is no connction. request was ignored");
+            }
+        }
+
+        private static async Task SendAnywayAsync
+            (NetworkClientWorker worker, TTransmitPacket packet, TimeSpan timeout)
+        {
+            if (timeout.TotalMilliseconds < 1)
+            {
+                throw new ArgumentException("timeout is required");
+            }
+            //var worker = await this.GetWorkerAsync().ConfigureAwait(false);
+            if (worker != null)
+            {
+                await worker.SendAnywayAsync(packet, timeout).ConfigureAwait(false);
                 Console.WriteLine("completed");
             }
             else
@@ -331,11 +432,13 @@ namespace Boredbone.ContinuousNetworkClient
                             this.client = new TcpClient();
                             if (this.options.IpAddresss != null)
                             {
-                                await client.ConnectAsync(this.options.IpAddresss, this.options.Port);
+                                await client.ConnectAsync(this.options.IpAddresss, this.options.Port)
+                                    .ConfigureAwait(false);
                             }
                             else
                             {
-                                await client.ConnectAsync(this.options.HostName, this.options.Port);
+                                await client.ConnectAsync(this.options.HostName, this.options.Port)
+                                    .ConfigureAwait(false);
                             }
 
                             Console.WriteLine(client.Client.LocalEndPoint);
@@ -374,7 +477,8 @@ namespace Boredbone.ContinuousNetworkClient
                                 await sslStream.AuthenticateAsClientAsync(this.serverCertificate.ServerName,
                                     this.serverCertificate.CertificateCollection,
                                     SslProtocols.Ssl2 | SslProtocols.Ssl3 | SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12,
-                                    false);
+                                    false)
+                                    .ConfigureAwait(false);
 
                                 this.stream = sslStream;
 
@@ -403,9 +507,10 @@ namespace Boredbone.ContinuousNetworkClient
 
                         while (this.client.Connected)
                         {
-                            await this.ReadAsync(cancellationToken);
+                            await this.ReadAsync(cancellationToken).ConfigureAwait(false);
 
-                            await Task.Delay(100);
+                            //TODO test
+                            await Task.Delay(100).ConfigureAwait(false);
 
                             var socket = this.client?.Client;
                             if (socket == null || (socket.Poll(100_000, SelectMode.SelectRead) && (socket.Available == 0)))
@@ -442,33 +547,45 @@ namespace Boredbone.ContinuousNetworkClient
                 }
             }
 
-            public async Task SendAsync(TTransmitPacket packet, CancellationToken parentCancellationToken)
+            public async Task SendAsync
+                (TTransmitPacket packet, TimeSpan timeout, CancellationToken parentCancellationToken)
             {
-                //Console.WriteLine("write start");
-                //Console.WriteLine("stream " + ((this.stream == null) ? "null" : "active"));
-                //Console.WriteLine("client " + ((this.client.Connected) ? "connected" : "disconnected"));
+                using (var timeoutCancellation = new CancellationTokenSource(timeout))
+                using (var linkedCancellationTokenSource = CancellationTokenSource
+                    .CreateLinkedTokenSource(this.cancellationTokenSource.Token,
+                    parentCancellationToken, timeoutCancellation.Token))
+                {
+                    await this.streamHelper.WriteAsync(this.stream, packet, linkedCancellationTokenSource.Token)
+                        .ConfigureAwait(false);
+                }
+            }
 
-                //var enc = System.Text.Encoding.UTF8;
-                //var send_bytes = enc.GetBytes(text);
-
-                using (var cancellationTokenSource = CancellationTokenSource
+            public async Task SendAsync
+                (TTransmitPacket packet, CancellationToken parentCancellationToken)
+            {
+                using (var linkedCancellationTokenSource = CancellationTokenSource
                     .CreateLinkedTokenSource(this.cancellationTokenSource.Token, parentCancellationToken))
                 {
-                    var cancellationToken = cancellationTokenSource.Token;
-
-                    await this.streamHelper.WriteAsync(this.stream, packet, cancellationToken);
-
-                    //await stream.WriteAsync(send_bytes, 0, send_bytes.Length);
+                    await this.streamHelper.WriteAsync(this.stream, packet, linkedCancellationTokenSource.Token)
+                        .ConfigureAwait(false);
                 }
-                //Console.WriteLine("stream " + ((this.stream == null) ? "null" : "active"));
-                //Console.WriteLine("client " + ((this.client.Connected) ? "connected" : "disconnected"));
-                //Console.WriteLine("write completed");
             }
+
+            public async Task SendAnywayAsync(TTransmitPacket packet, TimeSpan timeout)
+            {
+                using (var timeoutCancellation = new CancellationTokenSource(timeout))
+                {
+                    await this.streamHelper.WriteAsync(this.stream, packet, timeoutCancellation.Token)
+                        .ConfigureAwait(false);
+                }
+            }
+
 
             private async Task ReadAsync(CancellationToken cancellationToken)
             {
 
-                var (isSucceeded, packet) = await this.streamHelper.ReadAsync(this.stream, cancellationToken);
+                var (isSucceeded, packet) = await this.streamHelper.ReadAsync(this.stream, cancellationToken)
+                    .ConfigureAwait(false);
 
                 if (isSucceeded)
                 {
@@ -486,130 +603,6 @@ namespace Boredbone.ContinuousNetworkClient
             }
 
 
-            ////証明書の内容を表示するメソッド
-            //private static void PrintCertificate(X509Certificate certificate)
-            //{
-            //    if (certificate == null)
-            //    {
-            //        return;
-            //    }
-            //    Console.WriteLine("===========================================");
-            //    Console.WriteLine("Subject={0}", certificate.Subject);
-            //    Console.WriteLine("Issuer={0}", certificate.Issuer);
-            //    Console.WriteLine("Format={0}", certificate.GetFormat());
-            //    Console.WriteLine("ExpirationDate={0}", certificate.GetExpirationDateString());
-            //    Console.WriteLine("EffectiveDate={0}", certificate.GetEffectiveDateString());
-            //    Console.WriteLine("KeyAlgorithm={0}", certificate.GetKeyAlgorithm());
-            //    Console.WriteLine("PublicKey={0}", certificate.GetPublicKeyString());
-            //    Console.WriteLine("SerialNumber={0}", certificate.GetSerialNumberString());
-            //    Console.WriteLine("===========================================");
-            //}
-            //
-            ////サーバー証明書を検証するためのコールバックメソッド
-            //private static Boolean RemoteCertificateValidationCallback(Object sender,
-            //    X509Certificate certificate,
-            //    X509Chain chain,
-            //    SslPolicyErrors sslPolicyErrors)
-            //{
-            //    //PrintCertificate(certificate);
-            //    //Console.WriteLine(certificate.ToString(true));
-            //
-            //    if (sslPolicyErrors == SslPolicyErrors.None)
-            //    {
-            //        Console.WriteLine("サーバー証明書の検証に成功しました\n");
-            //        return true;
-            //    }
-            //    else
-            //    {
-            //        //何かサーバー証明書検証エラーが発生している
-            //
-            //        //SslPolicyErrors列挙体には、Flags属性があるので、
-            //        //エラーの原因が複数含まれているかもしれない。
-            //        //そのため、&演算子で１つ１つエラーの原因を検出する。
-            //        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateChainErrors) ==
-            //            SslPolicyErrors.RemoteCertificateChainErrors)
-            //        {
-            //            Console.WriteLine("ChainStatusが、空でない配列を返しました");
-            //        }
-            //
-            //        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNameMismatch) ==
-            //            SslPolicyErrors.RemoteCertificateNameMismatch)
-            //        {
-            //            Console.WriteLine("証明書名が不一致です");
-            //        }
-            //
-            //        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNotAvailable) ==
-            //            SslPolicyErrors.RemoteCertificateNotAvailable)
-            //        {
-            //            Console.WriteLine("証明書が利用できません");
-            //        }
-            //
-            //
-            //        foreach (var item in X509Certificates)
-            //        {
-            //            if (certificate.Issuer == item.Issuer)
-            //            {
-            //                Console.WriteLine("ok");
-            //                PrintCertificate(certificate);
-            //                PrintCertificate(item);
-            //            }
-            //        }
-            //
-            //        return true;
-            //        //検証失敗とする
-            //        return false;
-            //    }
-            //}
-            //
-            //public static X509Certificate SelectLocalCertificate(
-            //    object sender,
-            //    string targetHost,
-            //    X509CertificateCollection localCertificates,
-            //    X509Certificate remoteCertificate,
-            //    string[] acceptableIssuers)
-            //{
-            //    /*
-            //    foreach(var item in acceptableIssuers)
-            //    {
-            //        Console.WriteLine(item);
-            //    }*/
-            //    //foreach (var item in localCertificates)
-            //    //{
-            //    //    PrintCertificate(item);
-            //    //}
-            //    //PrintCertificate(remoteCertificate);
-            //
-            //
-            //
-            //    Console.WriteLine("Client is selecting a local certificate.");
-            //    if (acceptableIssuers != null &&
-            //        acceptableIssuers.Length > 0 &&
-            //        X509Certificates != null &&
-            //        X509Certificates.Count > 0)
-            //    {
-            //        // Use the first certificate that is from an acceptable issuer.
-            //        foreach (X509Certificate certificate in X509Certificates)
-            //        {
-            //            string issuer = certificate.Issuer;
-            //            if (Array.IndexOf(acceptableIssuers, issuer) != -1)
-            //            {
-            //                Console.WriteLine("selected");
-            //                return certificate;
-            //            }
-            //        }
-            //    }
-            //
-            //    var n = 1;
-            //    if (X509Certificates != null &&
-            //        X509Certificates.Count > n)
-            //    {
-            //        Console.WriteLine("use first cert");
-            //        return X509Certificates[n];
-            //    }
-            //    Console.WriteLine("no cert");
-            //
-            //    return null;
-            //}
 
             public static void SetTcpKeepAlive(Socket socket, uint keepaliveTime, uint keepaliveInterval)
             {

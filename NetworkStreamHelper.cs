@@ -1,5 +1,6 @@
 ﻿using Boredbone.ContinuousNetworkClient.Packet;
 using Boredbone.Utility;
+using Boredbone.Utility.Extensions;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -30,19 +31,27 @@ namespace Boredbone.ContinuousNetworkClient
 
         }
 
-        private async Task WriteWithCancellationAsync
-            (Stream stream, byte[] data, CancellationToken cancellationToken)
-        {
-            var task = stream.WriteAsync(data, 0, data.Length, cancellationToken);
-            task.Wait(cancellationToken);
-            await task;
-        }
+        //private async Task WriteWithCancellationAsync
+        //    (Stream stream, byte[] data, TimeSpan timeout, CancellationToken cancellationToken)
+        //{
+        //    var task = stream.WriteAsync(data, 0, data.Length, cancellationToken);
+        //    var time = timeout.TotalMilliseconds;
+        //    if (time < 1)
+        //    {
+        //        task.Wait(cancellationToken);
+        //    }
+        //    else
+        //    {
+        //        task.Wait((int)time, cancellationToken);
+        //    }
+        //    await task;
+        //}
 
         public async Task WriteAsync(Stream stream, TTransmitPacket packet, CancellationToken cancellationToken)
         {
             using (var locking = await this.writeLock.LockAsync().ConfigureAwait(false))
             {
-                await packet.WriteToStreamAsync(stream, cancellationToken);
+                await packet.WriteToStreamAsync(stream, cancellationToken).ConfigureAwait(false);
             }
             //foreach (var item in packet.GetTransmitData())
             //{
@@ -195,11 +204,10 @@ namespace Boredbone.ContinuousNetworkClient
                 while (!cancellationToken.IsCancellationRequested
                     && (this.length == 0 || this.index >= this.length))
                 {
-                    var readTask = stream.ReadAsync
-                        (this.receiveBuffer, 0, this.receiveBuffer.Length, cancellationToken);
-
-                    readTask.Wait(cancellationToken);
-                    var receivedLength = await readTask;
+                    var receivedLength = await stream.ReadAsync
+                        (this.receiveBuffer, 0, this.receiveBuffer.Length, cancellationToken)
+                        .WithCancellation(cancellationToken)
+                        .ConfigureAwait(false);
 
                     //var receivedLength = await stream.ReadAsync(this.receiveBuffer, 0, this.receiveBuffer.Length);
                     Console.WriteLine($"reader received {receivedLength}");
@@ -223,7 +231,8 @@ namespace Boredbone.ContinuousNetworkClient
                 for (int i = 0; i < resultBuffer.Length; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var (data, isSucceeded) = await this.ReadNextAsync(stream, cancellationToken);
+                    var (data, isSucceeded) = await this.ReadNextAsync(stream, cancellationToken)
+                        .ConfigureAwait(false);
 
                     if (!isSucceeded)
                     {

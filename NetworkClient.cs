@@ -206,6 +206,12 @@ namespace Boredbone.ContinuousNetworkClient
         }
 
 
+        public async Task ResetConnectionAsync()
+        {
+            Console.WriteLine("reset connection");
+            this.retryToConnectSameServerCount = 0;
+            await this.CloseWorkerAsync(null);
+        }
 
         public Task RedirectAsync(NetworkOptions options)
             => (options != null) ? this.CloseWorkerAsync(options) : throw new ArgumentNullException();

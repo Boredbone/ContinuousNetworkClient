@@ -287,7 +287,7 @@ namespace Boredbone.ContinuousNetworkClient
             if (worker != null)
             {
                 await worker.SendAnywayAsync(packet, timeout).ConfigureAwait(false);
-                Console.WriteLine("completed");
+                Console.WriteLine("completed to send");
             }
             else
             {
@@ -429,14 +429,13 @@ namespace Boredbone.ContinuousNetworkClient
                             bool useSsl = true;
                             if (useSsl && this.serverCertificate != null)
                             {
-                                var sslStream = new SslStream(client.GetStream(), false);
+                                //var sslStream = new SslStream(client.GetStream(), false);
                                 //var sslStream =
                                 //    new SslStream(client.GetStream(), false,
                                 //    RemoteCertificateValidationCallback, SelectLocalCertificate,
                                 //    EncryptionPolicy.RequireEncryption);
-                                //var sslStream =
-                                //    new SslStream(client.GetStream(), false,
-                                //    RemoteCertificateValidationCallback);
+                                var sslStream = new SslStream
+                                    (client.GetStream(), false, ValidateRemoteCertificate);
 
                                 await sslStream.AuthenticateAsClientAsync(this.serverCertificate.ServerName,
                                     this.serverCertificate.CertificateCollection,
@@ -449,7 +448,7 @@ namespace Boredbone.ContinuousNetworkClient
 
                                 if (sslStream.LocalCertificate == null)
                                 {
-                                    Console.WriteLine("local cert null");
+                                    //Console.WriteLine("local cert null");
                                 }
                                 else
                                 {
@@ -463,12 +462,8 @@ namespace Boredbone.ContinuousNetworkClient
                             }
                         }
 
-
-
-                        Console.WriteLine("connection start");
-
-                        Console.WriteLine("stream " + ((this.stream == null) ? "null" : "active"));
-                        Console.WriteLine("client " + ((this.client.Connected) ? "connected" : "disconnected"));
+                        Console.WriteLine("connection start, stream " + ((this.stream == null) ? "null" : "active")
+                            + ", client " + ((this.client.Connected) ? "connected" : "disconnected"));
 
                         this.ConnectedSubject.OnNext(this.client.Client.RemoteEndPoint);
 
@@ -570,27 +565,58 @@ namespace Boredbone.ContinuousNetworkClient
             }
 
 
-
-            public static void SetTcpKeepAlive(Socket socket, uint keepaliveTime, uint keepaliveInterval)
+            private bool ValidateRemoteCertificate
+                (Object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
             {
-                /* the native structure
-                struct tcp_keepalive {
-                ULONG onoff;
-                ULONG keepalivetime;
-                ULONG keepaliveinterval;
-                };
-                */
+                if (sslPolicyErrors == SslPolicyErrors.None)
+                {
+                    Console.WriteLine("server certificate is effective");
 
-                // marshal the equivalent of the native structure into a byte array
-                // uint dummy = 0;
-                byte[] inOptionValues = new byte[sizeof(UInt32) * 3];
-                BitConverter.GetBytes((uint)keepaliveTime).CopyTo(inOptionValues, 0);
-                BitConverter.GetBytes((uint)keepaliveTime).CopyTo(inOptionValues, sizeof(UInt32));
-                BitConverter.GetBytes((uint)keepaliveInterval).CopyTo(inOptionValues, sizeof(UInt32) * 2);
+                    if (this.serverCertificate.CertificateHashs == null)
+                    {
+                        return true;
+                    }
 
-                // write SIO_VALS to Socket IOControl
-                socket.IOControl(IOControlCode.KeepAliveValues, inOptionValues, null);
+                    foreach (var item in chain.ChainElements)
+                    {
+                        //Console.WriteLine("chain cert = " + item.Certificate.GetCertHashString());
+                        if (this.serverCertificate.CertificateHashs
+                            .Contains(item.Certificate.GetCertHashString()))
+                        {
+                            return true;
+                        }
+                    }
+
+                    Console.WriteLine("unknown certificate");
+                    return false;
+                }
+                else
+                {
+                    Console.WriteLine($"certificaten validate error {sslPolicyErrors}");
+                    return false;
+                }
             }
+
+            //public static void SetTcpKeepAlive(Socket socket, uint keepaliveTime, uint keepaliveInterval)
+            //{
+            //    /* the native structure
+            //    struct tcp_keepalive {
+            //    ULONG onoff;
+            //    ULONG keepalivetime;
+            //    ULONG keepaliveinterval;
+            //    };
+            //    */
+            //
+            //    // marshal the equivalent of the native structure into a byte array
+            //    // uint dummy = 0;
+            //    byte[] inOptionValues = new byte[sizeof(UInt32) * 3];
+            //    BitConverter.GetBytes((uint)keepaliveTime).CopyTo(inOptionValues, 0);
+            //    BitConverter.GetBytes((uint)keepaliveTime).CopyTo(inOptionValues, sizeof(UInt32));
+            //    BitConverter.GetBytes((uint)keepaliveInterval).CopyTo(inOptionValues, sizeof(UInt32) * 2);
+            //
+            //    // write SIO_VALS to Socket IOControl
+            //    socket.IOControl(IOControlCode.KeepAliveValues, inOptionValues, null);
+            //}
         }
     }
 }

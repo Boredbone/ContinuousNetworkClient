@@ -210,7 +210,7 @@ namespace Boredbone.ContinuousNetworkClient
                         .ConfigureAwait(false);
 
                     //var receivedLength = await stream.ReadAsync(this.receiveBuffer, 0, this.receiveBuffer.Length);
-                    Console.WriteLine($"reader received {receivedLength}");
+                    Console.WriteLine($"reader received ({receivedLength} byte)");
                     if (receivedLength <= 0)
                     {
                         //continue;

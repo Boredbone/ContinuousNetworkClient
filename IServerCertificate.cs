@@ -10,6 +10,7 @@ namespace Boredbone.ContinuousNetworkClient
     public interface IServerCertificate
     {
         X509CertificateCollection CertificateCollection { get; }
+        HashSet<string> CertificateHashs { get; }
 
         string ServerName { get; }
     }

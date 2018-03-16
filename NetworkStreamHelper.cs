@@ -17,6 +17,7 @@ namespace Boredbone.ContinuousNetworkClient
         where TReceivePacket : IReceivePacket, new()
         where TTransmitPacket : ITransmitPacket
     {
+        private static NLog.Logger logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly SteppingStreamReader receiveStreamReader;
         private readonly AsyncLock readLock;
         private readonly AsyncLock writeLock;
@@ -210,7 +211,7 @@ namespace Boredbone.ContinuousNetworkClient
                         .ConfigureAwait(false);
 
                     //var receivedLength = await stream.ReadAsync(this.receiveBuffer, 0, this.receiveBuffer.Length);
-                    Console.WriteLine($"reader received ({receivedLength} byte)");
+                    logger.Info($"reader received ({receivedLength} byte)");
                     if (receivedLength <= 0)
                     {
                         //continue;

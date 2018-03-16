@@ -10,7 +10,8 @@ namespace Boredbone.ContinuousNetworkClient.Packet
 {
     public interface ITransmitPacket
     {
-        int Length { get; }
+        int Priority { get; }
+        //int Length { get; }
         //IEnumerable<byte[]> GetTransmitData();
         Task WriteToStreamAsync(Stream destination, CancellationToken cancellationToken);
     }

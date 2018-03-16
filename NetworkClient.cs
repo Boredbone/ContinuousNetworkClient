@@ -20,6 +20,8 @@ using Boredbone.ContinuousNetworkClient.Packet;
 using Boredbone.Utility;
 using Boredbone.Utility.Extensions;
 using System.Collections.Concurrent;
+using System.Reactive.Threading.Tasks;
+using System.Reactive;
 
 namespace Boredbone.ContinuousNetworkClient
 {
@@ -42,10 +44,138 @@ namespace Boredbone.ContinuousNetworkClient
         }
     }
 
+    public class QueueingNetworkClient<TReceivePacket, TTransmitPacket> : IDisposable
+        where TReceivePacket : IReceivePacket, new()
+        where TTransmitPacket : ITransmitPacket
+    {
+        private CompositeDisposable disposables;
+
+
+        public IObservable<TReceivePacket> Received => this.networkClient.Received;
+
+        public IObservable<EndPoint> Connected => this.networkClient.Connected;
+
+        public IServerCertificate ServerCertificate
+        {
+            get => this.networkClient.ServerCertificate;
+            set => this.networkClient.ServerCertificate = value;
+        }
+
+        public int MaxRetryCountOfConnectingSameServer
+        {
+            get => this.networkClient.MaxRetryCountOfConnectingSameServer;
+            set => this.networkClient.MaxRetryCountOfConnectingSameServer = value;
+        }
+        public TimeSpan ConnectionStableTimeThreshold
+        {
+            get => this.networkClient.ConnectionStableTimeThreshold;
+            set => this.networkClient.ConnectionStableTimeThreshold = value;
+        }
+        public TimeSpan TransmitTimeout
+        {
+            get => this.networkClient.TransmitTimeout;
+            set => this.networkClient.TransmitTimeout = value;
+        }
+
+
+        private PacketTransmissionQueue<TTransmitPacket> queue;
+        public IPriorityQueue<TTransmitPacket> Queue => this.queue;
+
+        private NetworkClient<TReceivePacket, TTransmitPacket> networkClient;
+
+        private AsyncSubject<Unit> queueSubscription;
+
+        public QueueingNetworkClient()
+        {
+            this.disposables = new CompositeDisposable();
+
+            this.networkClient = new NetworkClient<TReceivePacket, TTransmitPacket>().AddTo(this.disposables);
+            this.queue = new PacketTransmissionQueue<TTransmitPacket>().AddTo(this.disposables);
+
+            this.queueSubscription = this.queue.Requested
+                .SelectMany(x => this.networkClient.SendAsync(x).ToObservable())
+                .GetAwaiter()
+                .AddTo(this.disposables);
+        }
+
+        public void Enqueue(TTransmitPacket packet)
+        {
+            this.queue.Enqueue(packet);
+        }
+
+        public async Task DisconnectAsync(TimeSpan timeout)
+        {
+            this.queue.Close();
+            await this.queueSubscription.Timeout(timeout);
+            this.networkClient.Cancel();
+        }
+
+        public void Cancel() => this.networkClient.Cancel();
+
+        public Task WorkAsync(NetworkOptions options) => this.networkClient.WorkAsync(options);
+
+
+        public Task ResetConnectionAsync() => this.networkClient.ResetConnectionAsync();
+
+        public Task RedirectAsync(NetworkOptions options) => this.networkClient.RedirectAsync(options);
+
+        public void Dispose()
+        {
+            this.disposables.Dispose();
+        }
+    }
+
+    public interface IPriorityQueue<T>
+    {
+        void Enqueue(T packet);
+    }
+
+    internal class PacketTransmissionQueue<T> : IDisposable, IPriorityQueue<T>
+        where T : ITransmitPacket
+    {
+        private CompositeDisposable disposables;
+
+        private Subject<T> requestedSubject;
+        public IObservable<T> Requested => this.requestedSubject.AsObservable();
+
+        public PacketTransmissionQueue()
+        {
+            this.disposables = new CompositeDisposable();
+
+            this.requestedSubject = new Subject<T>().AddTo(this.disposables);
+
+
+        }
+
+        public void Enqueue(T packet)
+        {
+            if (this.requestedSubject.IsDisposed)
+            {
+                return;
+            }
+            this.requestedSubject.OnNext(packet);
+        }
+
+        public void Close()
+        {
+            if (this.requestedSubject.IsDisposed)
+            {
+                return;
+            }
+            this.requestedSubject.OnCompleted();
+        }
+
+        public void Dispose()
+        {
+            this.disposables.Dispose();
+        }
+    }
+
     public class NetworkClient<TReceivePacket, TTransmitPacket> : IDisposable
         where TReceivePacket : IReceivePacket, new()
         where TTransmitPacket : ITransmitPacket
     {
+        private static NLog.Logger logger = NLog.LogManager.GetCurrentClassLogger();
         private CompositeDisposable disposables;
 
         private Subject<TReceivePacket> ReceivedSubject { get; }
@@ -109,15 +239,15 @@ namespace Boredbone.ContinuousNetworkClient
         {
             try
             {
-                Console.WriteLine("start connection");
+                logger.Info("start connection");
                 await this.RedirectAsync(options);
-                Console.WriteLine($"connect to {this.nextOptions.HostName}:{this.nextOptions.Port}");
+                logger.Info($"connect to {this.nextOptions.HostName}:{this.nextOptions.Port}");
                 this.retryToConnectSameServerCount++;
                 await this.WorkMainAsync();
             }
             catch (Exception e)
             {
-                Console.WriteLine(e);
+                logger.Error(e);
                 throw;
             }
         }
@@ -130,7 +260,7 @@ namespace Boredbone.ContinuousNetworkClient
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                Console.WriteLine($"try to connect server. {this.retryToConnectSameServerCount}th try");
+                logger.Info($"try to connect server. {this.retryToConnectSameServerCount}th try");
                 var startTime = DateTimeOffset.UtcNow;
 
                 try
@@ -149,19 +279,19 @@ namespace Boredbone.ContinuousNetworkClient
                 }
                 catch (OperationCanceledException e)
                 {
-                    Console.WriteLine("client excep\nOperationCanceledException :" + e.Message);
+                    logger.Error("client excep\nOperationCanceledException :" + e.Message);
                     if (e.InnerException != null)
                     {
-                        Console.WriteLine("client excep inner\n" + e.InnerException.ToString());
+                        logger.Error("client excep inner\n" + e.InnerException.ToString());
                     }
                     break;
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine("client excep\n" + e.ToString());
+                    logger.Error("client excep\n" + e.ToString());
                     if (e.InnerException != null)
                     {
-                        Console.WriteLine("client excep inner\n" + e.InnerException.ToString());
+                        logger.Error("client excep inner\n" + e.InnerException.ToString());
                     }
                     if (!CheckConnectionRetryCount(startTime))
                     {
@@ -208,7 +338,7 @@ namespace Boredbone.ContinuousNetworkClient
 
         public async Task ResetConnectionAsync()
         {
-            Console.WriteLine("reset connection");
+            logger.Warn("reset connection");
             this.retryToConnectSameServerCount = 0;
             await this.CloseWorkerAsync(null);
         }
@@ -268,11 +398,11 @@ namespace Boredbone.ContinuousNetworkClient
                     await worker.SendAsync(packet, this.cancellationTokenSource.Token)
                         .ConfigureAwait(false);
                 }
-                Console.WriteLine("completed");
+                logger.Info("completed");
             }
             else
             {
-                Console.WriteLine("There is no connction. request was ignored");
+                logger.Error("There is no connction. request was ignored");
             }
         }
 
@@ -287,11 +417,11 @@ namespace Boredbone.ContinuousNetworkClient
             if (worker != null)
             {
                 await worker.SendAnywayAsync(packet, timeout).ConfigureAwait(false);
-                Console.WriteLine("completed to send");
+                logger.Info("completed to send");
             }
             else
             {
-                Console.WriteLine("There is no connction. request was ignored");
+                logger.Error("There is no connction. request was ignored");
             }
         }
 
@@ -405,7 +535,7 @@ namespace Boredbone.ContinuousNetworkClient
                                     .ConfigureAwait(false);
                             }
 
-                            Console.WriteLine($"connected to {client.Client.RemoteEndPoint} " +
+                            logger.Info($"connected to {client.Client.RemoteEndPoint} " +
                                 $"from {client.Client.LocalEndPoint}");
 
 
@@ -448,11 +578,11 @@ namespace Boredbone.ContinuousNetworkClient
 
                                 if (sslStream.LocalCertificate == null)
                                 {
-                                    //Console.WriteLine("local cert null");
+                                    //logger.Warn("local cert null");
                                 }
                                 else
                                 {
-                                    Console.WriteLine(sslStream.LocalCertificate);
+                                    logger.Info(sslStream.LocalCertificate);
                                 }
 
                             }
@@ -462,7 +592,7 @@ namespace Boredbone.ContinuousNetworkClient
                             }
                         }
 
-                        Console.WriteLine("connection start, stream " + ((this.stream == null) ? "null" : "active")
+                        logger.Info("connection start, stream " + ((this.stream == null) ? "null" : "active")
                             + ", client " + ((this.client.Connected) ? "connected" : "disconnected"));
 
                         this.ConnectedSubject.OnNext(this.client.Client.RemoteEndPoint);
@@ -482,34 +612,34 @@ namespace Boredbone.ContinuousNetworkClient
                         }
                     }
 
-                    Console.WriteLine("socket disconnection is detected");
+                    logger.Error("socket disconnection is detected");
                 }
                 catch (OperationCanceledException e)
                 {
-                    Console.WriteLine("client worker excep\nOperationCanceledException :" + e.Message);
+                    logger.Error("client worker excep\nOperationCanceledException :" + e.Message);
                     if (e.InnerException != null)
                     {
-                        Console.WriteLine("client worker excep inner\n" + e.InnerException.ToString());
+                        logger.Error("client worker excep inner\n" + e.InnerException.ToString());
                     }
-                    Console.WriteLine("parent" + parentCancellationToken.IsCancellationRequested);
-                    Console.WriteLine("child" + this.cancellationTokenSource.Token.IsCancellationRequested);
+                    logger.Error("parent" + parentCancellationToken.IsCancellationRequested);
+                    logger.Error("child" + this.cancellationTokenSource.Token.IsCancellationRequested);
                     throw;
 
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine("client worker excep\n" + e.ToString());
+                    logger.Error("client worker excep\n" + e.ToString());
                     if (e.InnerException != null)
                     {
-                        Console.WriteLine("client worker excep inner\n" + e.InnerException.ToString());
+                        logger.Error("client worker excep inner\n" + e.InnerException.ToString());
                     }
-                    Console.WriteLine("parent" + parentCancellationToken.IsCancellationRequested);
-                    Console.WriteLine("child" + this.cancellationTokenSource.Token.IsCancellationRequested);
+                    logger.Error("parent" + parentCancellationToken.IsCancellationRequested);
+                    logger.Error("child" + this.cancellationTokenSource.Token.IsCancellationRequested);
                     throw;
                 }
             }
 
-            public async Task SendAsync
+            public Task SendAsync
                 (TTransmitPacket packet, TimeSpan timeout, CancellationToken parentCancellationToken)
             {
                 using (var timeoutCancellation = new CancellationTokenSource(timeout))
@@ -517,28 +647,25 @@ namespace Boredbone.ContinuousNetworkClient
                     .CreateLinkedTokenSource(this.cancellationTokenSource.Token,
                     parentCancellationToken, timeoutCancellation.Token))
                 {
-                    await this.streamHelper.WriteAsync(this.stream, packet, linkedCancellationTokenSource.Token)
-                        .ConfigureAwait(false);
+                    return this.streamHelper.WriteAsync(this.stream, packet, linkedCancellationTokenSource.Token);
                 }
             }
 
-            public async Task SendAsync
+            public Task SendAsync
                 (TTransmitPacket packet, CancellationToken parentCancellationToken)
             {
                 using (var linkedCancellationTokenSource = CancellationTokenSource
                     .CreateLinkedTokenSource(this.cancellationTokenSource.Token, parentCancellationToken))
                 {
-                    await this.streamHelper.WriteAsync(this.stream, packet, linkedCancellationTokenSource.Token)
-                        .ConfigureAwait(false);
+                    return this.streamHelper.WriteAsync(this.stream, packet, linkedCancellationTokenSource.Token);
                 }
             }
 
-            public async Task SendAnywayAsync(TTransmitPacket packet, TimeSpan timeout)
+            public Task SendAnywayAsync(TTransmitPacket packet, TimeSpan timeout)
             {
                 using (var timeoutCancellation = new CancellationTokenSource(timeout))
                 {
-                    await this.streamHelper.WriteAsync(this.stream, packet, timeoutCancellation.Token)
-                        .ConfigureAwait(false);
+                    return this.streamHelper.WriteAsync(this.stream, packet, timeoutCancellation.Token);
                 }
             }
 
@@ -555,7 +682,7 @@ namespace Boredbone.ContinuousNetworkClient
                 }
                 else
                 {
-                    Console.WriteLine("receive failed");
+                    logger.Error("receive failed");
                 }
             }
 
@@ -570,7 +697,7 @@ namespace Boredbone.ContinuousNetworkClient
             {
                 if (sslPolicyErrors == SslPolicyErrors.None)
                 {
-                    Console.WriteLine("server certificate is effective");
+                    logger.Info("server certificate is effective");
 
                     if (this.serverCertificate.CertificateHashs == null)
                     {
@@ -579,7 +706,7 @@ namespace Boredbone.ContinuousNetworkClient
 
                     foreach (var item in chain.ChainElements)
                     {
-                        //Console.WriteLine("chain cert = " + item.Certificate.GetCertHashString());
+                        //logger.Info("chain cert = " + item.Certificate.GetCertHashString());
                         if (this.serverCertificate.CertificateHashs
                             .Contains(item.Certificate.GetCertHashString()))
                         {
@@ -587,12 +714,12 @@ namespace Boredbone.ContinuousNetworkClient
                         }
                     }
 
-                    Console.WriteLine("unknown certificate");
+                    logger.Error("unknown certificate");
                     return false;
                 }
                 else
                 {
-                    Console.WriteLine($"certificaten validate error {sslPolicyErrors}");
+                    logger.Error($"certificaten validate error {sslPolicyErrors}");
                     return false;
                 }
             }
